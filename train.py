@@ -230,6 +230,7 @@ X_BOUND = 300
 Y_BOUND = 300
 PITCH = 0.4
 MAX_LEN = 200
+LAYER_HEIGHT = 0.3
 
 
 class gcode_dataset(Dataset):
@@ -255,25 +256,30 @@ class gcode_dataset(Dataset):
             assert np.allclose(obj.bounds[0][2], 0)
 
             layers = gcode.GCode.from_file(gcode_file).split_layers()
-            heights = list(layers.keys())
+            offset = LAYER_HEIGHT/2
+            heights = list(height - offset for height in layers.keys())
             planes = obj.section_multiplane((0, 0, 0), (0, 0, 1), heights)
             for height, plane in zip(heights, planes):
-                commands = layers[height]
+                commands = layers[height+offset]
+                if not plane:
+                    print(f"{stl_file}: missing plane this slice {height}")
+                    continue
+                assert len(commands) > 0
+                assert height >= 0
                 self.examples.append((plane, height, commands))
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        path, height, commands = self.examples[idx]
-        assert path, "must have a path for this slice"
-        assert len(commands) > 0
-        assert height >= 0
+        plane, height, commands = self.examples[idx]
         out = np.zeros((MAX_LEN, 4))
         for i, cmd in enumerate(commands[:MAX_LEN]):
             out[i, :] = (cmd.X, cmd.Y, cmd.E, cmd.F)
+        out -= (X_BOUND / 2, Y_BOUND/2, 0, 5000)
+        out /= (X_BOUND / 2, Y_BOUND/2, 1, 10000)
         img = trimesh.path.raster.rasterize(
-            path,
+            plane,
             pitch=PITCH,
             resolution=(X_BOUND / PITCH, Y_BOUND / PITCH),
             origin=(0, 0),
@@ -287,7 +293,7 @@ class gcode_dataset(Dataset):
 
 
 class Net(nn.Module):
-    def __init__(self, embedding_dim=1000, hidden_dim=6, output_size=4):
+    def __init__(self, embedding_dim=1000, hidden_dim=100, output_size=4):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
@@ -323,8 +329,8 @@ trainloader = torch.utils.data.DataLoader(
 
 model = Net().to(device)
 print(model)
-optimizer = optim.AdamW(model.parameters())
-loss_function = torch.nn.MSELoss()
+optimizer = optim.AdamW(model.parameters(), lr=0.0001)
+loss_function = torch.nn.SmoothL1Loss()
 
 for img, label in tqdm(trainloader):
     img = img.to(device)
