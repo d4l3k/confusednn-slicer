@@ -1,6 +1,7 @@
 import copy
 from collections import defaultdict
 
+
 class GCodeBase:
     def __init__(self, args):
         self.args = args
@@ -8,8 +9,10 @@ class GCodeBase:
     def __repr__(self):
         return f"{self.code} {' '.join(self.args)}"
 
+
 class GCodePosition(GCodeBase):
-    ARGS = 'XYZEF'
+    ARGS = "XYZEF"
+
     def __init__(self, args):
         super().__init__(args)
 
@@ -36,19 +39,24 @@ class GCodePosition(GCodeBase):
         args = [f"{key}{value}" for key, value in self.positions.items()]
         return f"{self.code} {' '.join(args)}"
 
+
 class GCodeMove(GCodePosition):
     pass
 
+
 class GCodeSetPosition(GCodePosition):
     pass
+
 
 class GCodeSetFanSpeed(GCodeBase):
     def __init__(self, args):
         super().__init__(args)
 
+
 def GCodeFanOff(args):
     assert len(args) == 0, f"should not have args {args}"
-    return GCodeSetFanSpeed(['S0'])
+    return GCodeSetFanSpeed(["S0"])
+
 
 GCODES = {
     "G1": GCodeMove,
@@ -60,6 +68,7 @@ GCODES = {
 for code, cls in GCODES.items():
     cls.code = code
 
+
 class GCode:
     def __init__(self):
         self.commands = []
@@ -67,7 +76,7 @@ class GCode:
     @classmethod
     def from_file(cls, filename):
         gcode = GCode()
-        with open(filename, 'r') as fh:
+        with open(filename, "r") as fh:
             for line_str in fh.readlines():
                 code = line_str.split(";")[0].strip()
                 if not code:
@@ -78,18 +87,18 @@ class GCode:
     def parse(self, code):
         command, *args = code.split(" ")
         if command not in GCODES:
-            #print(f"unsupported command {command} {args}. skipping")
+            # print(f"unsupported command {command} {args}. skipping")
             return
         gcode = GCODES[command](args)
         self.commands.append(gcode)
 
     def __repr__(self):
-        commands = '\n' + '\n'.join(f"  {item}" for item in self.commands) + '\n'
+        commands = "\n" + "\n".join(f"  {item}" for item in self.commands) + "\n"
         return f"GCode(commands=[{commands}])"
 
     def normalize(self):
         gcode = GCode()
-        pos = GCodePosition(['E0', 'X0', 'Y0'])
+        pos = GCodePosition(["E0", "X0", "Y0"])
         for cmd in self.commands:
             if isinstance(cmd, GCodeSetPosition):
                 pos.update(pos)
@@ -104,8 +113,10 @@ class GCode:
                 pos.update(cmd)
                 if cmd.X or cmd.Y or cmd.E:
                     assert (
-                        new.X is not None and new.Y is not None and new.E is not
-                        None and new.F is not None
+                        new.X is not None
+                        and new.Y is not None
+                        and new.E is not None
+                        and new.F is not None
                     ), f"missing field {new} from {cmd}"
                     # print(new, cmd)
                     gcode.commands.append(new)
@@ -120,9 +131,6 @@ class GCode:
             layers[command.Z].append(command)
 
         return layers
-
-
-
 
 
 if __name__ == "__main__":
