@@ -245,6 +245,17 @@ pillow = ">=4.1.1"
 torch = "1.6.0"
 
 [[package]]
+name = "tqdm"
+version = "4.48.2"
+description = "Fast, Extensible Progress Meter"
+category = "main"
+optional = false
+python-versions = ">=2.6, !=3.0.*, !=3.1.*"
+
+[package.extras]
+dev = ["py-make (>=0.1.0)", "twine", "argopt", "pydoc-markdown"]
+
+[[package]]
 name = "trimesh"
 version = "3.8.4"
 description = "Import, export, process, analyze and view triangular meshes."
@@ -264,7 +275,7 @@ setuptools = "*"
 [metadata]
 lock-version = "1.0"
 python-versions = "^3.8"
-content-hash = "1597618c7f64317d8dc4e1e161a91ed3b55439ee18040515aae9501b6a917592"
+content-hash = "ad1a56a03b82a75777927ae2d137c7624ea59c4923d2221bd3beb8ce11261aca"
 
 [metadata.files]
 argparse = [
@@ -480,6 +491,10 @@ torchvision = [
     {file = "torchvision-0.7.0-cp37-cp37m-manylinux1_x86_64.whl", hash = "sha256:0d1a5adfef4387659c7a0af3b72e16caa0c67224a422050ab65184d13ac9fb13"},
     {file = "torchvision-0.7.0-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:f5686e0a0dd511ac33eb9d6279bd34edd9f282dcb7c8ad21e290882c6206504f"},
     {file = "torchvision-0.7.0-cp38-cp38-manylinux1_x86_64.whl", hash = "sha256:cfa2b367bc9acf20f18b151d0525970279719e81969c17214effe77245875354"},
+]
+tqdm = [
+    {file = "tqdm-4.48.2-py2.py3-none-any.whl", hash = "sha256:1a336d2b829be50e46b84668691e0a2719f26c97c62846298dd5ae2937e4d5cf"},
+    {file = "tqdm-4.48.2.tar.gz", hash = "sha256:564d632ea2b9cb52979f7956e093e831c28d441c11751682f84c86fc46e4fd21"},
 ]
 trimesh = [
     {file = "trimesh-3.8.4-py3-none-any.whl", hash = "sha256:163caf61622e2e2b3e6a01f211a75dfa23b7b4d956b58b4c1a8e5abb49d4a3b8"},

@@ -18,6 +18,7 @@ shapely = "^1.7.1"
 networkx = "^2.5"
 matplotlib = "^3.3.1"
 rtree = "^0.9.4"
+tqdm = "^4.48.2"
 
 [tool.poetry.dev-dependencies]
 

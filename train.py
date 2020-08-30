@@ -9,6 +9,7 @@ from torchvision import transforms
 
 import gcode
 import trimesh
+from tqdm import tqdm
 
 
 class SpiralConv(nn.Module):
@@ -234,10 +235,10 @@ MAX_LEN = 200
 class gcode_dataset(Dataset):
     def __init__(self, root_dir):
         self.transform = transforms.Compose([transforms.ToTensor(),])
-        gcode_files = glob.glob(path.join(root_dir, "DSA_1u.gcode"))
+        gcode_files = glob.glob(path.join(root_dir, "*.gcode"))
         stl_files = set(glob.glob(path.join(root_dir, "*.stl")))
         self.examples = []
-        for gcode_file in gcode_files:
+        for gcode_file in tqdm(gcode_files):
             base_file, _ = path.splitext(gcode_file)
             stl_file = base_file + ".stl"
             if stl_file not in stl_files:
@@ -245,7 +246,8 @@ class gcode_dataset(Dataset):
                 continue
             print(f"parsing {stl_file}")
             obj = trimesh.load_mesh(file_obj=stl_file, file_type="stl")
-            assert obj.is_watertight, "must be watertight mesh"
+            if not obj.is_watertight:
+                print(f"{stl_file} is not watertight!")
             min, max = obj.bounds
             center = (min + max) / 2
             center[2] = min[2]
@@ -299,20 +301,15 @@ class Net(nn.Module):
         self.lstm = nn.LSTM(embedding_dim, hidden_dim)
 
         # The linear layer that maps from hidden state space to tag space
-        self.hidden2tag = nn.Linear(hidden_dim, output_size)
+        self.fc = nn.Linear(hidden_dim, output_size)
 
     def forward(self, image):
         x = self.cnn(image)
-        print(x.shape)
         x = x.expand((MAX_LEN, len(image), self.embedding_dim))
-        print(x.shape)
         lstm_out, _ = self.lstm(x)
-        print(lstm_out.shape)
         x = lstm_out.view(-1, self.hidden_dim)
-        print(x.shape)
-        tag_space = self.hidden2tag(x)
+        tag_space = self.fc(x)
         x = tag_space.view(-1, MAX_LEN, self.output_size)
-        print(x.shape)
         return x
 
 
@@ -321,7 +318,7 @@ dataset = gcode_dataset("data")
 print("examples: ", len(dataset))
 
 trainloader = torch.utils.data.DataLoader(
-    dataset, batch_size=16, shuffle=True, num_workers=8
+    dataset, batch_size=4, shuffle=True, num_workers=8
 )
 
 model = Net().to(device)
@@ -329,7 +326,7 @@ print(model)
 optimizer = optim.AdamW(model.parameters())
 loss_function = torch.nn.MSELoss()
 
-for img, label in trainloader:
+for img, label in tqdm(trainloader):
     img = img.to(device)
     label = label.to(device)
 
