@@ -229,14 +229,15 @@ class SpiralAutoencoder(nn.Module):
 X_BOUND = 300
 Y_BOUND = 300
 PITCH = 0.4
-MAX_LEN = 200
+#MAX_LEN = 200
+MAX_LEN = 50
 LAYER_HEIGHT = 0.3
 
 
 class gcode_dataset(Dataset):
     def __init__(self, root_dir):
         self.transform = transforms.Compose([transforms.ToTensor(),])
-        gcode_files = glob.glob(path.join(root_dir, "*.gcode"))
+        gcode_files = glob.glob(path.join(root_dir, "DSA_1u.gcode"))
         stl_files = set(glob.glob(path.join(root_dir, "*.stl")))
         self.examples = []
         for gcode_file in tqdm(gcode_files):
@@ -266,6 +267,7 @@ class gcode_dataset(Dataset):
                     continue
                 assert len(commands) > 0
                 assert height >= 0
+                assert plane.area > 0
                 self.examples.append((plane, height, commands))
 
     def __len__(self):
@@ -273,11 +275,11 @@ class gcode_dataset(Dataset):
 
     def __getitem__(self, idx):
         plane, height, commands = self.examples[idx]
-        out = np.zeros((MAX_LEN, 4))
+        out = np.zeros((MAX_LEN, 2))
         for i, cmd in enumerate(commands[:MAX_LEN]):
-            out[i, :] = (cmd.X, cmd.Y, cmd.E, cmd.F)
-        out -= (X_BOUND / 2, Y_BOUND/2, 0, 5000)
-        out /= (X_BOUND / 2, Y_BOUND/2, 1, 10000)
+            out[i, :] = (cmd.X, cmd.Y) #, cmd.E, cmd.F)
+        out -= (X_BOUND / 2, Y_BOUND/2) #, 0, 5000)
+        out /= (X_BOUND / 2, Y_BOUND/2) #, 1, 10000)
         img = trimesh.path.raster.rasterize(
             plane,
             pitch=PITCH,
@@ -291,31 +293,105 @@ class gcode_dataset(Dataset):
 
         return tensor, torch.tensor(out, dtype=torch.float)
 
-
-class Net(nn.Module):
-    def __init__(self, embedding_dim=1000, hidden_dim=100, output_size=4):
+class Encoder(nn.Module):
+    def __init__(self, output_size):
         super().__init__()
+
+        self.output_size = output_size
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 6, 5),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(6, 16, 5),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, 32, 5),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(32, 64, 5),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(64, 32, 5),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2, 2),
+        )
+        self.fc = nn.Linear(32 * 19 * 19, output_size)
+
+    def forward(self, image):
+        x = self.cnn(image)
+        x = self.fc(x.view(len(image), -1))
+        return x
+
+class Decoder(nn.Module):
+    def __init__(self, embedding_dim, output_size, hidden_dim=200):
+        super().__init__()
+
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.output_size = output_size
 
-        self.cnn = torch.hub.load("pytorch/vision:v0.6.0", "resnet18", pretrained=True)
-        self.cnn.conv1 = torch.nn.Conv1d(1, 64, (7, 7), (2, 2), (3, 3), bias=False)
-
         # The LSTM takes word embeddings as inputs, and outputs hidden states
         # with dimensionality hidden_dim.
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim)
+        self.rnn = nn.GRU(embedding_dim, hidden_dim, num_layers=2)
 
         # The linear layer that maps from hidden state space to tag space
-        self.fc = nn.Linear(hidden_dim, output_size)
+        self.fc2 = nn.Sequential(
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, 200),
+            nn.Linear(200, 150),
+            nn.Linear(150, output_size),
+        )
+
+    def forward(self, x):
+        x = x.expand((MAX_LEN, len(x), self.embedding_dim))
+        lstm_out, _ = self.rnn(x)
+        x = lstm_out.view(-1, self.hidden_dim)
+        tag_space = self.fc2(x)
+        x = tag_space.view(-1, MAX_LEN, self.output_size)
+        return x
+
+class DecoderCNN(nn.Module):
+    def __init__(self, embedding_dim, output_size, hidden_dim=200):
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+        self.output_size = output_size
+
+        self.cnn = nn.Sequential(
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(embedding_dim, 500, 4, stride=2),
+            nn.ConvTranspose1d(500, 250, 5, stride=2),
+            nn.ConvTranspose1d(250, 100, 4, stride=2),
+            nn.ConvTranspose1d(100, 60, 4, stride=2),
+        )
+
+        # The linear layer that maps from hidden state space to tag space
+        self.fc2 = nn.Sequential(
+            nn.Linear(60, 200),
+            nn.Linear(200, 150),
+            nn.Linear(150, output_size),
+        )
+
+    def forward(self, x):
+        batch_size = len(x)
+        x = self.cnn(x.unsqueeze(2))
+        x = x.transpose(1, 2)
+        x = x.reshape(batch_size * MAX_LEN, -1)
+        x = self.fc2(x)
+        x = x.view(batch_size, MAX_LEN, -1)
+        return x
+
+class Net(nn.Module):
+    def __init__(self, embedding_dim=1000, output_size=2):
+        super().__init__()
+
+        self.encoder = Encoder(embedding_dim)
+        self.decoder = DecoderCNN(embedding_dim, output_size)
 
     def forward(self, image):
-        x = self.cnn(image)
-        x = x.expand((MAX_LEN, len(image), self.embedding_dim))
-        lstm_out, _ = self.lstm(x)
-        x = lstm_out.view(-1, self.hidden_dim)
-        tag_space = self.fc(x)
-        x = tag_space.view(-1, MAX_LEN, self.output_size)
+        x = self.encoder(image)
+        x = self.decoder(x)
         return x
 
 
@@ -324,22 +400,48 @@ dataset = gcode_dataset("data")
 print("examples: ", len(dataset))
 
 trainloader = torch.utils.data.DataLoader(
-    dataset, batch_size=4, shuffle=True, num_workers=8
+    dataset, batch_size=16, shuffle=True, num_workers=8
 )
 
 model = Net().to(device)
+model.train()
 print(model)
 optimizer = optim.AdamW(model.parameters(), lr=0.0001)
-loss_function = torch.nn.SmoothL1Loss()
+#loss_function = torch.nn.SmoothL1Loss()
+loss_function = torch.nn.MSELoss()
 
-for img, label in tqdm(trainloader):
-    img = img.to(device)
-    label = label.to(device)
+def write_gcode(f, out):
+    with open(f, 'w') as f:
+        f.write("M107 ; fan off\n")
+        f.write("M104 S200 ; set temp\n")
+        f.write("G28 ; home all axes\n")
+        f.write("G1 Z5 F5000 ; lift nozzle\n")
+        f.write("M109 S200 ; heat and wait\n")
+        f.write("G21 ; millimeters\n")
+        f.write("G90 ; absolute coordinates\n")
+        f.write("M83 ; extruder relative\n")
+        for x, y in out:
+            x = x * (X_BOUND / 2) + X_BOUND / 2
+            y = y * (Y_BOUND / 2) + Y_BOUND / 2
+            f.write(f"G1 X{x:.3f} Y{y:.3f} E1 F5000\n")
 
-    model.zero_grad()
-    out = model(img)
 
-    loss = loss_function(out, label)
-    print(loss)
-    loss.backward()
-    optimizer.step()
+for epoch in range(10000):
+    print(f"epoch {epoch}")
+    for img, label in tqdm(trainloader):
+        img = img.to(device)
+        label = label.to(device)
+
+        model.zero_grad()
+        print(label.shape)
+        out = model(img)
+
+        loss = loss_function(out, label)
+        print(loss.item())
+        loss.backward()
+        optimizer.step()
+    if epoch % 10 == 0:
+        print(out)
+        write_gcode('label.gcode', label[0])
+        write_gcode('out.gcode', out[0])
+    #print(label)

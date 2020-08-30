@@ -8,7 +8,6 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.8"
 numpy = "^1.19.1"
-numpy-stl = "^2.11.2"
 torch = "^1.6.0"
 torchvision = "^0.7.0"
 pygcode = "^0.2.1"
