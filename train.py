@@ -229,15 +229,15 @@ class SpiralAutoencoder(nn.Module):
 X_BOUND = 300
 Y_BOUND = 300
 PITCH = 0.4
-#MAX_LEN = 200
-MAX_LEN = 50
+MAX_LEN = 200
+#MAX_LEN = 50
 LAYER_HEIGHT = 0.3
 
 
 class gcode_dataset(Dataset):
     def __init__(self, root_dir):
         self.transform = transforms.Compose([transforms.ToTensor(),])
-        gcode_files = glob.glob(path.join(root_dir, "DSA_1u.gcode"))
+        gcode_files = glob.glob(path.join(root_dir, "DSA_*.gcode"))
         stl_files = set(glob.glob(path.join(root_dir, "*.stl")))
         self.examples = []
         for gcode_file in tqdm(gcode_files):
@@ -256,27 +256,31 @@ class gcode_dataset(Dataset):
             obj.apply_translation(-center + (X_BOUND / 2, Y_BOUND / 2, 0))
             assert np.allclose(obj.bounds[0][2], 0)
 
-            layers = gcode.GCode.from_file(gcode_file).split_layers()
+            layers = gcode.GCode.from_file(gcode_file).normalize().split_layers()
             offset = LAYER_HEIGHT/2
             heights = list(height - offset for height in layers.keys())
             planes = obj.section_multiplane((0, 0, 0), (0, 0, 1), heights)
             for height, plane in zip(heights, planes):
-                commands = layers[height+offset]
+                code = layers[height+offset]
                 if not plane:
                     print(f"{stl_file}: missing plane this slice {height}")
                     continue
-                assert len(commands) > 0
+                assert len(code.commands) > 0
                 assert height >= 0
                 assert plane.area > 0
-                self.examples.append((plane, height, commands))
+                self.examples.append((plane, height, code))
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        plane, height, commands = self.examples[idx]
+        plane, height, code = self.examples[idx]
+        #if len(commands) > MAX_LEN:
+        #    print(f'longer than max len {len(commands)}')
         out = np.zeros((MAX_LEN, 2))
-        for i, cmd in enumerate(commands[:MAX_LEN]):
+        rasterized = code.rasterize(MAX_LEN)
+        assert len(rasterized.commands) == MAX_LEN
+        for i, cmd in enumerate(rasterized.commands):
             out[i, :] = (cmd.X, cmd.Y) #, cmd.E, cmd.F)
         out -= (X_BOUND / 2, Y_BOUND/2) #, 0, 5000)
         out /= (X_BOUND / 2, Y_BOUND/2) #, 1, 10000)
@@ -288,10 +292,12 @@ class gcode_dataset(Dataset):
             fill=True,
             width=None,
         )
-        tensor = self.transform(img) * 2 - 1
-        assert np.allclose(tensor.max(), 1) and np.allclose(tensor.min(), -1)
+        grid = self.transform(img) * 2 - 1
+        assert np.allclose(grid.max(), 1) and np.allclose(grid.min(), -1)
 
-        return tensor, torch.tensor(out, dtype=torch.float)
+        dense = torch.tensor([height/200], dtype=torch.float)
+        label = torch.tensor(out, dtype=torch.float)
+        return grid, dense, label
 
 class Encoder(nn.Module):
     def __init__(self, output_size):
@@ -359,11 +365,17 @@ class DecoderCNN(nn.Module):
         self.output_size = output_size
 
         self.cnn = nn.Sequential(
-            nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(embedding_dim, 500, 4, stride=2),
+            nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(500, 250, 5, stride=2),
+            nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(250, 100, 4, stride=2),
-            nn.ConvTranspose1d(100, 60, 4, stride=2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(100, 60, 3, stride=2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(60, 60, 3, stride=2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(60, 60, 4, stride=2),
         )
 
         # The linear layer that maps from hidden state space to tag space
@@ -376,6 +388,8 @@ class DecoderCNN(nn.Module):
     def forward(self, x):
         batch_size = len(x)
         x = self.cnn(x.unsqueeze(2))
+        if x.shape[2] != MAX_LEN:
+            print(x.shape)
         x = x.transpose(1, 2)
         x = x.reshape(batch_size * MAX_LEN, -1)
         x = self.fc2(x)
@@ -383,15 +397,15 @@ class DecoderCNN(nn.Module):
         return x
 
 class Net(nn.Module):
-    def __init__(self, embedding_dim=1000, output_size=2):
+    def __init__(self, embedding_dim=1000, dense_dim=1, output_size=2):
         super().__init__()
 
         self.encoder = Encoder(embedding_dim)
-        self.decoder = DecoderCNN(embedding_dim, output_size)
+        self.decoder = DecoderCNN(embedding_dim + dense_dim, output_size)
 
-    def forward(self, image):
+    def forward(self, image, dense):
         x = self.encoder(image)
-        x = self.decoder(x)
+        x = self.decoder(torch.cat((x, dense), dim=1))
         return x
 
 
@@ -400,13 +414,14 @@ dataset = gcode_dataset("data")
 print("examples: ", len(dataset))
 
 trainloader = torch.utils.data.DataLoader(
-    dataset, batch_size=16, shuffle=True, num_workers=8
+    dataset, batch_size=64, shuffle=True, num_workers=16
 )
 
 model = Net().to(device)
 model.train()
 print(model)
-optimizer = optim.AdamW(model.parameters(), lr=0.0001)
+optimizer = optim.AdamW(model.parameters(), lr=0.001)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5)
 #loss_function = torch.nn.SmoothL1Loss()
 loss_function = torch.nn.MSELoss()
 
@@ -426,22 +441,38 @@ def write_gcode(f, out):
             f.write(f"G1 X{x:.3f} Y{y:.3f} E1 F5000\n")
 
 
+best_loss = 1000000
 for epoch in range(10000):
-    print(f"epoch {epoch}")
-    for img, label in tqdm(trainloader):
-        img = img.to(device)
+    summed_loss = 0.0
+    num_examples = 0
+    pbar = tqdm(trainloader)
+    for img_cpu, dense, label in pbar:
+        img = img_cpu.to(device)
+        dense = dense.to(device)
         label = label.to(device)
 
         model.zero_grad()
-        print(label.shape)
-        out = model(img)
+        out = model(img, dense)
 
         loss = loss_function(out, label)
-        print(loss.item())
         loss.backward()
         optimizer.step()
-    if epoch % 10 == 0:
-        print(out)
-        write_gcode('label.gcode', label[0])
-        write_gcode('out.gcode', out[0])
+
+        summed_loss += loss.item() * len(label)
+        num_examples += len(label)
+        cur_loss = summed_loss/num_examples
+        pbar.set_description(
+            f"epoch {epoch} - loss {cur_loss}",
+            refresh=False,
+        )
+    if cur_loss < best_loss:
+        best_loss = cur_loss
+        print(f"new best loss {best_loss}")
+        normalized = img_cpu[0] / 0.5 + 1
+        im = transforms.ToPILImage()(normalized)
+        im.save(f'image{epoch}.png', format='png')
+        write_gcode(f'label{epoch}.gcode', label[0])
+        write_gcode(f'out{epoch}.gcode', out[0])
+
+    scheduler.step(cur_loss)
     #print(label)

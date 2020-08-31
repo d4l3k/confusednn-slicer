@@ -1,6 +1,9 @@
 import copy
 from collections import defaultdict
 
+import math
+import numpy as np
+
 
 class GCodeBase:
     def __init__(self, args):
@@ -22,8 +25,19 @@ class GCodePosition(GCodeBase):
             assert arg_type in GCodeSetPosition.ARGS, f"invalid arg {arg}"
             self.positions[arg_type] = float(arg[1:])
 
+    def distance(self, b):
+        return math.sqrt(
+            (self.X-b.X)**2 + (self.Y-b.Y)**2 + (self.Z-b.Z)**2
+        )
+
     def update(self, position):
         self.positions.update(position.positions)
+
+    def __eq__(self, other):
+        return self.positions == other.positions
+
+    def __hash__(self):
+        return hash(self.__repr__())
 
     def __getattr__(self, name: str) -> float:
         if name in GCodePosition.ARGS:
@@ -119,25 +133,93 @@ class GCode:
                         and new.F is not None
                     ), f"missing field {new} from {cmd}"
                     # print(new, cmd)
+                    assert not len(gcode.commands) or gcode.commands[-1] != new, f"duplicate command {new}"
                     gcode.commands.append(new)
 
         return gcode
 
     def split_layers(self):
-        normalized = self.normalize()
-        layers = defaultdict(lambda: [])
-        for command in normalized.commands:
+        assert self.normalized(), "must be normalized"
+
+        layers = defaultdict(lambda: GCode())
+        for command in self.commands:
             assert isinstance(command, GCodeMove)
-            layers[command.Z].append(command)
+            layers[command.Z].commands.append(command)
 
         return layers
+
+    def normalized(self):
+        return all(isinstance(cmd, GCodeMove) for cmd in self.commands)
+
+    def path_length(self):
+        if len(self.commands) == 0:
+            return 0.0
+        assert self.normalized(), "must be normalized"
+        computed_len = 0.0
+        start = self.commands[0]
+        for cmd in self.commands[1:]:
+            computed_len += start.distance(cmd)
+            start = cmd
+        return computed_len
+
+    def rasterize(self, n):
+        assert self.normalized(), "must be normalized"
+        assert len(self.commands) > 1, "can't rasterize single point"
+        step_size = (len(self.commands)-1) / (n-1)
+        samples = defaultdict(lambda: 0)
+        targets = [i * step_size for i in range(n-1)]
+        targets.append(len(self.commands) - 1)
+        assert len(targets) == n, f"{targets}, {len(self.commands)}, {step_size}"
+        for i in targets:
+            samples[int(i)] += 1
+
+        idxs = list(samples.keys())
+        idxs.sort()
+
+        gcode = GCode()
+        for i in idxs:
+            count = samples[i]
+            cmd = copy.deepcopy(self.commands[i])
+            cmd.E /= count
+            gcode.commands.append(cmd)
+            if count > 1:
+                next = copy.deepcopy(self.commands[i+1])
+                xstep = (next.X-cmd.X) / count
+                ystep = (next.Y-cmd.Y) / count
+                zstep = (next.Z-cmd.Z) / count
+                for step in range(1, count):
+                    point = copy.deepcopy(cmd)
+                    point.X += xstep * step
+                    point.Y += ystep * step
+                    point.Z += zstep * step
+                    gcode.commands.append(point)
+
+        assert len(gcode.commands) == n, f"wrong number of outputs {n} != {len(gcode.commands)}: {gcode}"
+        assert self.commands[0].distance(gcode.commands[0]) < 0.0001,  "must include first point"
+        assert self.commands[-1].distance(gcode.commands[-1]) < 0.0001, "must include last point"
+
+        return gcode
+
+
 
 
 if __name__ == "__main__":
     gcode = GCode.from_file("data/DSA_1u.gcode")
     normalized = gcode.normalize()
     assert len(normalized.commands)
-    layers = gcode.split_layers()
+    assert normalized.path_length() > 0, "missing path"
+    assert normalized.rasterize(10)
+    layers = normalized.split_layers()
     assert len(layers) > 0
-    for height, commands in layers.items():
-        print(height, len(commands))
+    for height, gcode in layers.items():
+        assert height and len(gcode.commands) > 0
+
+    rasterized = gcode.rasterize(200)
+    assert len(rasterized.commands) > len(gcode.commands), f"{len(gcode.commands)}"
+    command_counts = defaultdict(lambda: 0)
+    for cmd in rasterized.commands:
+        command_counts[cmd] += 1
+
+    for cmd, count in command_counts.items():
+        if count > 1:
+            print([(i, b) for i, b in enumerate(rasterized.commands) if b == cmd])
